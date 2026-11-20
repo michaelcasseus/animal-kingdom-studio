@@ -5977,6 +5977,33 @@ var drumSamples = drumCollections.flatMap(({ kingdom, prefix: prefix2, assets, p
   category: asset.group,
   source: `${asset.source}${processing}`
 })));
+var samplePacks = [
+  { folder: "jaybay-the-knick", name: "JayBay The Knick", bassRoot: 24, instrumentRoot: 72 },
+  { folder: "immortal", name: "Immortal", bassRoot: 34, instrumentRoot: 65 },
+  { folder: "timbo-off-that", name: "Timbo Off That", bassRoot: 31, instrumentRoot: 72 },
+  { folder: "dr-dre-in-da-club", name: "Dr Dre In Da Club", bassRoot: 30, instrumentRoot: 56 },
+  { folder: "chief-sosa-l-no-thotties", name: "Chief Sosa L No Thotties", bassRoot: 33, instrumentRoot: 64 }
+];
+var samplePackFolders = samplePacks.map((pack) => pack.folder);
+var samplePackSamples = samplePacks.flatMap(({ folder, name, bassRoot, instrumentRoot }) => [
+  ["Kick", "kicks"],
+  ["Snare", "snares"],
+  ["Bass", "bass", bassRoot],
+  ["Percs", "percs"],
+  ["Instrument", "instruments", instrumentRoot]
+].map(([sound2, kingdom, root2]) => {
+  const id2 = `${folder}-${sound2.toLowerCase()}`;
+  return {
+    id: id2,
+    name: `${name} ${sound2}`,
+    kingdom,
+    kind: "upload",
+    data: `./assets/${folder}/${id2}.wav`,
+    category: name,
+    source: "User-provided mix with overdrive, stereo chorus, and smoothed treble",
+    ...root2 === void 0 ? {} : { sampler: { root: root2 } }
+  };
+}));
 var drumReferenceSamples = [
   {
     id: "drum-reference-ny-drill-rim",
@@ -6069,7 +6096,8 @@ var builtInSamples = [
   ...extraHypedSamples,
   ...bassSamples,
   ...drumReferenceSamples,
-  ...drumSamples
+  ...drumSamples,
+  ...samplePackSamples
 ];
 var builtInById = new Map(builtInSamples.map((sample2) => [sample2.id, sample2]));
 var legacyDemoById = new Map((publicDemo ? [...demoHypedSamples, ...demoRhythmSamples] : []).map((sample2) => [sample2.id, sample2]));
@@ -17936,6 +17964,7 @@ async function switchProject(project) {
 }
 function render(keepScroll = true) {
   clearArrangementDrag();
+  clearSelectionMarquee();
   cancelNotePropertyDrag();
   view.stepPage = boundedStepPage(view.stepPage ?? 0);
   if (view.selectedClips.size) {
@@ -18103,7 +18132,8 @@ function tick(now) {
   const beat = audio.beat, p = view.project, bar = beatsPerBar(p), meterUnit = 4 / p.signature[1];
   if (clipResize?.moved) paintClipResize(clipResize);
   if (arrangementDrag?.moved) paintArrangementDrag(arrangementDrag, true);
-  if (view.playing !== audio.isPlaying && !clipResize && !arrangementDrag && !notePropertyDrag && !mixVolumeDrag) render();
+  if (selectionMarquee?.kind === "clips" && selectionMarquee.moved) paintSelectionMarquee(selectionMarquee, true);
+  if (view.playing !== audio.isPlaying && !clipResize && !arrangementDrag && !selectionMarquee && !notePropertyDrag && !mixVolumeDrag) render();
   if (now < previewUntil) drawWaveform(now);
   if (beat === lastBeat && !audio.isPlaying && !app.querySelector("[data-meter]")) return;
   lastBeat = beat;
@@ -21056,11 +21086,13 @@ function arrangementDragPlacement(gesture) {
   const lane = single && gesture.anchor.type !== "pattern" && hovered ? hovered : gesture.lane;
   return { delta, hovered, lane, single };
 }
+function timelineLeftEdge(scroll, left) {
+  return Math.max(left, scroll.querySelector(".track-head")?.getBoundingClientRect().right ?? left);
+}
 function paintArrangementDrag(gesture, scrollAtEdge = false) {
   if (!gesture.lane.isConnected) return;
   const viewport = gesture.scroll.getBoundingClientRect();
-  const trackHead = gesture.scroll.querySelector(".track-head")?.getBoundingClientRect();
-  const leftEdge = Math.max(viewport.left, trackHead?.right ?? viewport.left);
+  const leftEdge = timelineLeftEdge(gesture.scroll, viewport.left);
   if (scrollAtEdge && gesture.currentY >= viewport.top && gesture.currentY <= viewport.bottom) {
     const x = gesture.currentX;
     if (x > viewport.right - 22 && x <= viewport.right) gesture.scroll.scrollLeft += 12;
@@ -21108,7 +21140,8 @@ function clearArrangementDrag() {
   for (const preview2 of arrangementDrag?.previews ?? []) preview2.ghost?.remove();
   arrangementDrag = void 0;
 }
-function startSelectionMarquee(kind, content, viewport, event, noteId) {
+function startSelectionMarquee(kind, content, viewport, event, noteId, capture) {
+  if (selectionMarquee) return;
   const rect = content.getBoundingClientRect();
   const box = document.createElement("div");
   box.className = kind === "notes" ? "note-marquee" : "clip-marquee";
@@ -21124,18 +21157,52 @@ function startSelectionMarquee(kind, content, viewport, event, noteId) {
     pointerId: event.pointerId,
     x: event.clientX - rect.left,
     y: event.clientY - rect.top,
+    startX: event.clientX,
+    startY: event.clientY,
+    currentX: event.clientX,
+    currentY: event.clientY,
+    moved: false,
     additive: event.shiftKey || event.ctrlKey || event.metaKey,
-    noteId
+    noteId,
+    capture
   };
+  capture?.setPointerCapture(event.pointerId);
 }
-function marqueeBounds(gesture, x, y) {
+function clearSelectionMarquee() {
+  const gesture = selectionMarquee;
+  selectionMarquee = void 0;
+  if (!gesture) return;
+  gesture.box.remove();
+  if (gesture.capture?.hasPointerCapture(gesture.pointerId)) gesture.capture.releasePointerCapture(gesture.pointerId);
+}
+function marqueeViewport(gesture) {
+  const { left, right, top, bottom } = gesture.viewport.getBoundingClientRect();
+  return gesture.kind === "clips" ? { left: timelineLeftEdge(gesture.viewport, left), right: left + gesture.viewport.clientWidth, top, bottom } : { left, right, top, bottom };
+}
+function marqueeBounds(gesture, x, y, viewport = marqueeViewport(gesture)) {
   const origin = gesture.content.getBoundingClientRect();
-  const viewport = gesture.viewport.getBoundingClientRect();
   const endX = clamp(x, viewport.left, viewport.right) - origin.left;
   const endY = clamp(y, viewport.top, viewport.bottom) - origin.top;
   const left = Math.min(gesture.x, endX), right = Math.max(gesture.x, endX);
   const top = Math.min(gesture.y, endY), bottom = Math.max(gesture.y, endY);
   return { left, right, top, bottom, origin };
+}
+function paintSelectionMarquee(gesture, scrollAtEdge = false) {
+  if (!gesture.content.isConnected) return;
+  const { currentX, currentY, viewport, box } = gesture;
+  const bounds = marqueeViewport(gesture);
+  if (scrollAtEdge) {
+    const { left: left2, right: right2, top: top2, bottom: bottom2 } = bounds;
+    if (currentY < top2 || currentY > bottom2) return;
+    const previous = viewport.scrollLeft;
+    if (currentX > right2 - 22) viewport.scrollLeft += 12;
+    else if (currentX < left2 + 22) viewport.scrollLeft -= 12;
+    if (viewport.scrollLeft === previous) return;
+  }
+  const { left, right, top, bottom } = marqueeBounds(gesture, currentX, currentY, bounds);
+  const width = right - left, height = bottom - top;
+  box.hidden = width + height <= 4;
+  Object.assign(box.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
 }
 var clipResize;
 function clipForResizeHandle(handle) {
@@ -21300,8 +21367,8 @@ app.addEventListener("pointerdown", (e) => {
   }
   const lane = target.closest("[data-lane]");
   const timeline = lane?.closest(".timeline-content");
-  if (timeline && !target.closest("[data-clip]") && e.pointerType !== "touch") {
-    startSelectionMarquee("clips", timeline, timeline.parentElement, e);
+  if (lane && timeline && !target.closest("[data-clip]") && e.pointerType !== "touch") {
+    startSelectionMarquee("clips", timeline, timeline.parentElement, e, void 0, lane);
     e.preventDefault();
     return;
   }
@@ -21361,6 +21428,7 @@ app.addEventListener("dblclick", (e) => {
 app.addEventListener("lostpointercapture", (e) => {
   if (mixVolumeDrag?.pointerId === e.pointerId) cancelMixVolumeDrag();
   if (clipResize?.pointerId === e.pointerId) cancelClipResize();
+  if (selectionMarquee?.pointerId === e.pointerId) clearSelectionMarquee();
 });
 window.addEventListener("pointermove", (e) => {
   if (mixVolumeDrag?.pointerId === e.pointerId) {
@@ -21404,10 +21472,11 @@ window.addEventListener("pointermove", (e) => {
     return;
   }
   if (selectionMarquee?.pointerId === e.pointerId && selectionMarquee.content.isConnected) {
-    const { left, right, top, bottom } = marqueeBounds(selectionMarquee, e.clientX, e.clientY);
-    const width = right - left, height = bottom - top;
-    selectionMarquee.box.hidden = width + height <= 4;
-    Object.assign(selectionMarquee.box.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+    const gesture = selectionMarquee;
+    gesture.currentX = e.clientX;
+    gesture.currentY = e.clientY;
+    gesture.moved ||= Math.abs(e.clientX - gesture.startX) + Math.abs(e.clientY - gesture.startY) > 4;
+    paintSelectionMarquee(gesture);
     return;
   }
   if (sideResize) sizePanel(sideResize.side, sideResize.width + (e.clientX - sideResize.x) * (sideResize.side === "library" ? 1 : -1));
@@ -21496,8 +21565,7 @@ window.addEventListener("pointerup", (e) => {
   }
   if (selectionMarquee?.pointerId === e.pointerId) {
     const gesture = selectionMarquee;
-    selectionMarquee = void 0;
-    gesture.box.remove();
+    clearSelectionMarquee();
     if (!gesture.content.isConnected) return;
     const { left, right, top, bottom, origin } = marqueeBounds(gesture, e.clientX, e.clientY);
     const moved2 = right - left + bottom - top > 4;
@@ -21589,12 +21657,14 @@ window.addEventListener("pointercancel", (e) => {
     mixResize = void 0;
     return;
   }
+  if (selectionMarquee?.pointerId === e.pointerId) {
+    clearSelectionMarquee();
+    return;
+  }
   pointerEdit = void 0;
   panelResize = void 0;
   sideResize = void 0;
   clipResize = void 0;
-  selectionMarquee?.box.remove();
-  selectionMarquee = void 0;
   render();
 });
 window.addEventListener("resize", () => syncMixResizeHandle());
@@ -21719,6 +21789,11 @@ document.addEventListener("keydown", (e) => {
   if (key === "escape" && mixVolumeDrag) {
     e.preventDefault();
     cancelMixVolumeDrag();
+    return;
+  }
+  if (key === "escape" && selectionMarquee) {
+    e.preventDefault();
+    clearSelectionMarquee();
     return;
   }
   if (mixVolumeDrag && !mod) {
@@ -21908,6 +21983,7 @@ document.addEventListener("keyup", (e) => {
 });
 window.addEventListener("blur", releaseComputerKeys);
 window.addEventListener("blur", cancelClipResize);
+window.addEventListener("blur", clearSelectionMarquee);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && dirty) void save(false);
 });
